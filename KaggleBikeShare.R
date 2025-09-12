@@ -1,15 +1,17 @@
 # Libraries
-library(tidyr)
 library(tidyverse)
 library(vroom)
-library(ggplot2)
 library(GGally)
 library(patchwork)
+library(tidymodels)
 
-# Read in data
+# ---- Read in data ----
 train <- vroom("data/train.csv")
 head(train)
 summary(train)
+
+
+# ---- Preliminary EDA ----
 
 train %>%
   select_if(is.numeric) %>%
@@ -59,4 +61,7 @@ p4 <- ggplot(train, aes(x = humidity, y = count)) +
 # Arrange in grid
 plot <- (p1 | p2) / (p3 | p4)
 
-ggsave("bike_share_eda.pdf", plot = final_plot, width = 10, height = 8)
+ggsave("data/bike_share_eda.pdf", plot = plot, width = 10, height = 8)
+
+
+
