@@ -132,45 +132,119 @@ head(baked_data, 5)
 
 
 # ======================
-# Penalized Regression: Homework 5
+# Penalized Regression: Homework 5 and 6
 # ======================
 
-# grid of penalty/mixture pairs
-param_grid <- tibble::tribble(
-  ~penalty, ~mixture,
-  0.001,    0.00,   # ridge
-  0.010,    0.25,
-  0.100,    0.50,   # elastic net
-  0.300,    0.75,
-  1.000,    1.00    # lasso
+library(tidymodels)
+
+## Penalized regression model
+preg_model <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+
+## Set Workflow
+preg_wf <- workflow() %>% 
+  add_recipe(mybike_recipe) %>% 
+  add_model(preg_model)
+
+## Grid of values to tune over
+L <- 12
+grid_of_tuning_params <- grid_regular(penalty(), mixture(), levels = L)
+
+## Split data for CV
+K <- 5
+folds <- vfold_cv(train, v = K)
+
+## Run the CV
+CV_results <- preg_wf %>%
+  tune_grid(resamples = folds,
+            grid = grid_of_tuning_params,
+            metrics = metric_set(rmse, mae))
+
+## Find Best Tuning Parameters
+bestTune <- CV_results %>% select_best(metric = "rmse")
+
+## Finalize the Workflow & fit it
+final_wf <- preg_wf %>% 
+  finalize_workflow(bestTune) %>% 
+  fit(data = train)
+
+## Predict on test (model was on log_count)
+preds_log <- predict(final_wf, new_data = test) %>% pull(.pred)
+counts    <- pmax(0, round(expm1(preds_log)))
+
+## Save Kaggle submission
+dir.create("submissions", showWarnings = FALSE)
+submission <- tibble(
+  datetime = format(as.POSIXct(test$datetime), "%Y-%m-%d %H:%M:%S"),
+  count    = as.integer(counts)
 )
 
-wf_base <- workflow() %>% add_recipe(mybike_recipe)
-dir.create("submissions", showWarnings = FALSE)
+pen_tag <- gsub("\\.", "p", sprintf("%.6f", bestTune$penalty))
+mix_tag <- gsub("\\.", "p", sprintf("%.2f",  bestTune$mixture))
+vroom::vroom_write(submission, "submissions/submission_glmnet.csv", delim = ",")
 
-for (i in seq_len(nrow(param_grid))) {
-  pen <- param_grid$penalty[i]
-  mix <- param_grid$mixture[i]
-  
-  preg_model <- linear_reg(penalty = pen, mixture = mix) %>%
-    set_engine("glmnet")
-  preg_wf <- wf_base %>% add_model(preg_model)
-  
-  fit_obj   <- fit(preg_wf, data = train)
-  preds_log <- predict(fit_obj, new_data = test)$.pred
-  counts    <- pmax(0, round(expm1(preds_log)))
-  
-  submission <- tibble(
-    datetime = format(as.POSIXct(test$datetime), "%Y-%m-%d %H:%M:%S"),
-    count    = as.integer(counts)
-  )
-  
-  # build filename tags
-  pen_tag <- gsub("\\.", "p", sprintf("%.3f", pen))
-  mix_tag <- gsub("\\.", "p", sprintf("%.2f", mix))
-  fn <- sprintf("submissions/submission_pen%s_mix%s.csv", pen_tag, mix_tag)
-  
-  vroom::vroom_write(submission, fn, delim = ",")
-  message("Wrote: ", fn)
-}
+message("Best params -> penalty: ", signif(bestTune$penalty, 4),
+        " | mixture: ", signif(bestTune$mixture, 4))
+
+
+# ======================
+# Regression Trees: Homework 7
+# ======================
+# Do it on the log of count
+
+library(rpart)
+
+my_mod <- decision_tree(
+  tree_depth      = tune(),
+  cost_complexity = tune(),
+  min_n           = tune()
+) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+# ---- Create a workflow with model & recipe (log_count outcome) ----
+tree_recipe <- recipe(log_count ~ ., data = train) %>%
+  step_mutate(
+    weather = factor(ifelse(weather == 4, 3, weather)),
+    season  = factor(season)
+  ) %>%
+  step_time(datetime, features = "hour", keep_original_cols = FALSE)
+
+tree_wf <- workflow() %>%
+  add_recipe(tree_recipe) %>%
+  add_model(my_mod)
+
+# ---- Set up grid of tuning values ----
+tree_grid <- grid_regular(
+  cost_complexity(),          # default log10 range
+  tree_depth(range = c(2L, 12L)),
+  min_n(range = c(2L, 30L)),
+  levels = c(5, 6, 5)         # small, simple grid
+)
+
+# ---- Set up K-fold CV ----
+set.seed(123)
+folds <- vfold_cv(train, v = 5, strata = log_count)
+
+# ---- Find best tuning parameters ----
+tree_res  <- tune_grid(tree_wf, resamples = folds, grid = tree_grid,
+                       metrics = metric_set(rmse))
+best_tree <- select_best(tree_res, metric = "rmse")
+
+# ---- Finalize workflow and predict ----
+final_tree_wf  <- finalize_workflow(tree_wf, best_tree)
+final_tree_fit <- fit(final_tree_wf, data = train)
+
+preds_log <- predict(final_tree_fit, new_data = test) %>% pull(.pred)
+counts    <- pmax(0, round(expm1(preds_log)))
+
+submission_tree <- tibble(
+  datetime = format(as.POSIXct(test$datetime), "%Y-%m-%d %H:%M:%S"),
+  count    = as.integer(counts)
+)
+
+dir.create("submissions", showWarnings = FALSE)
+vroom::vroom_write(submission_tree, "submissions/submission_tree.csv", delim = ",")
+
+best_tree
 
